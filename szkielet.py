@@ -6,22 +6,32 @@ import os
 import math
 import torch
 import time
+import threading
+from collections import deque
 import numpy as np
 
-#  definicje kątów dla deski
+#Definicja kątów ciała
 ANGLE_DEFS = [
-    ("Bark L",     (7, 5, (11, 12))),
-    ("Bark P",     (8, 6, (11, 12))),
-    ("Biodro",     ((5, 6), (11, 12), 13)),
-    ("Kolano L",   (11, 13, 15)),
-    ("Kolano P",   (12, 14, 16)),
-    ("Lokiec L",   (5, 7, 9)),
-    ("Lokiec P",   (6, 8, 10)),
+    ("Bark L",   (7,  5,  (11, 12))),
+    ("Bark P",   (8,  6,  (11, 12))),
+    ("Biodro",   ((5, 6), (11, 12), 13)),
+    ("Kolano L", (11, 13, 15)),
+    ("Kolano P", (12, 14, 16)),
+    ("Lokiec L", (5,  7,  9)),
+    ("Lokiec P", (6,  8,  10)),
 ]
 
-# Progi poprawności
-# Każdy wpis: (min, max, komunikat błędu gdy poza zakresem)
+#Progi kątów dla deski (kamera z boku)
+#Każdy wpis: (min, max, komunikat błędu gdy poza zakresem)
 PLANK_THRESHOLDS = {
+    "Biodro":   (165, 195, "Biodra za nisko lub za wysoko! Wyprostuj biodra."),
+    "Kolano L": (155, 195, "Lewe kolano zgięte! Wyprostuj lewą nogę."),
+    "Kolano P": (155, 195, "Prawe kolano zgięte! Wyprostuj prawą nogę."),
+    "Lokiec L": (75,  105, "Lewy łokieć: ustaw pod kątem ~90°."),
+    "Lokiec P": (75,  105, "Prawy łokieć: ustaw pod kątem ~90°."),
+}
+
+PLANK_THRESHOLDS_45_DEGREE = {
     "Biodro":   (165, 195, "Biodra za nisko lub za wysoko! Wyprostuj biodra."),
     "Kolano L": (155, 185, "Lewe kolano zgięte! Wyprostuj lewą nogę."),
     "Kolano P": (155, 185, "Prawe kolano zgięte! Wyprostuj prawą nogę."),
@@ -29,23 +39,24 @@ PLANK_THRESHOLDS = {
     "Lokiec P": (75,  105, "Prawy łokieć: ustaw pod kątem ~90°."),
 }
 
-# Detekcja deski: uznajemy że użytkownik robi deskę gdy kąt bioder i kolan mieści się w zakresie
+
+# Detekcja deski: program uznaje że użytkownik robi deskę gdy kąt bioder i kolan mieści się w zakresie
 PLANK_DETECTION_RANGES = {
     "Biodro":   (140, 210),
     "Kolano L": (130, 200),
     "Kolano P": (130, 200),
 }
 
+# Liczba ostatnich klatek do uśredniania błędów 
+SMOOTHING_FRAMES = 90
 
+
+#Funkcje do liczenia kątów i innych wartości
 def compute_angle(A, B, C):
-    """
-    przyjmuje: 3 punkty z ANGLE_DEFS
-    Oblicza kąt pomiędzy 3 sąsiednimi punktami
-    zwraca: Obliczony kąt w stopniach
-    """
+    """Oblicza kąt ABC (w stopniach) na podstawie trzech punktów (x,y)."""
     BA = (A[0] - B[0], A[1] - B[1])
     BC = (C[0] - B[0], C[1] - B[1])
-    dot = BA[0]*BC[0] + BA[1]*BC[1]
+    dot = BA[0] * BC[0] + BA[1] * BC[1]
     norm_BA = math.hypot(*BA)
     norm_BC = math.hypot(*BC)
     if norm_BA == 0 or norm_BC == 0:
@@ -53,12 +64,11 @@ def compute_angle(A, B, C):
     cos_angle = max(-1.0, min(1.0, dot / (norm_BA * norm_BC)))
     return math.degrees(math.acos(cos_angle))
 
+
 def get_point(xy, conf, idx):
     """
-    Pobiera współrzędne (x,y) i minimalną pewność.
-    xy – tablica numpy [17,2], conf – tablica [17]
-    idx: int (pojedynczy punkt) lub tuple (dwa indeksy do uśrednienia)
-    Zwraca: ((x,y), min_conf)
+    Pobiera punkt (x,y) i pewność.
+    idx może być int lub tuple dwóch indeksów – wtedy uśrednia oba punkty.
     """
     if isinstance(idx, tuple):
         p1, p2 = xy[idx[0]], xy[idx[1]]
@@ -152,11 +162,38 @@ def draw_angles_on_skeleton(frame, xy, conf, angles: dict, angle_conf: float):
                         text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
 
 
+
+class CameraReader(threading.Thread):
+    """
+    Czyta klatki z kamery w osobnym wątku,dla plików wideo i program czyta synchronicznie
+    żeby nie pomijać klatek i zachować oryginalną prędkość odtwarzania.
+    """
+    def __init__(self, cap):
+        super().__init__(daemon=True)
+        self.cap = cap
+        self._lock = threading.Lock()
+        self._frame = None
+        self._ok = True
+        self.stopped = False
+
+    def run(self):
+        while not self.stopped:
+            ret, frame = self.cap.read()
+            if not ret:
+                self._ok = False
+                break
+            with self._lock:
+                self._frame = frame
+
+    def read(self):
+        with self._lock:
+            return self._ok, self._frame
+
+    def stop(self):
+        self.stopped = True
+
+
 def get_source_from_menu():
-    """
-    Wypisuje czy obraz ma działać na podstawie Kamery czy na podstawie filmu video
-    Gdy plik nie istnieje wypisuje że nie ma takiego pliku
-    """
     print("\nWybierz źródło")
     print("1. Kamera")
     print("2. Film (plik wideo)")
@@ -173,16 +210,17 @@ def get_source_from_menu():
         else:
             print("Nieprawidłowy wybór. Wpisz 1 lub 2.")
 
+
 def main():
     parser = argparse.ArgumentParser(description="analiza deski")
     parser.add_argument("--model",type=str,default="yolov8s-pose.pt",
                         help="Ścieżka do modelu YOLO Pose")
-    parser.add_argument("--conf",type=float,default=0.4,
+    parser.add_argument("--conf",type=float,default=0.6,
                         help="Próg pewności detekcji (0-1)")
-    parser.add_argument("--angle-conf",type=float,default=0.4,
+    parser.add_argument("--angle-conf",type=float,default=0.5,
                         help="Minimalna pewność punktów do obliczenia kąta")
     # Mniejszy obraz = szybsza inferecja na CPU
-    parser.add_argument("--imgsz",type=int,default=320,
+    parser.add_argument("--imgsz",type=int,default=256,
                         help="Rozmiar obrazu wejściowego dla YOLO")
     #analiza co 2 klatki  
     parser.add_argument("--skip",type=int,default=2,
@@ -211,41 +249,74 @@ def main():
         sys.exit(1)
 
     source = get_source_from_menu()
+    is_camera = (source == 0)
+
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         print("Nie można otworzyć źródła wideo.")
         sys.exit(1)
 
+    if is_camera:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        video_fps = 30.0
+    else:
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        print(f"Plik wideo: {video_fps:.2f} FPS")
+
+    #długość trwania pojedyńczej klatki
+    frame_duration = 1.0 / video_fps
+
     print("\nRozpoczynam przetwarzanie. Naciśnij 'q' lub Esc, aby zakończyć.\n")
+
+    camera_reader = None
+    if is_camera:
+        camera_reader = CameraReader(cap)
+        camera_reader.start()
 
     frame_count = 0
     last_annotated = None
-    fps_limit = 30
-    frame_time = 1.0 / fps_limit
+    fps_counter = deque(maxlen=30)
+    error_buffer: deque[list] = deque(maxlen=SMOOTHING_FRAMES)
 
     while True:
-        start_time = time.perf_counter()
+        t0 = time.perf_counter()
 
-        ret, frame = cap.read()
-        if not ret:
-            print("Koniec strumienia.")
-            break
+        if is_camera:
+            ok, frame = camera_reader.read()
+            if not ok or frame is None:
+                time.sleep(0.005)
+                if not camera_reader._ok:
+                    print("Koniec strumienia.")
+                    break
+                continue
+        else:
+            ret, frame = cap.read()
+            if not ret:
+                print("Koniec pliku wideo.")
+                break
 
         if frame_count % args.skip == 0:
-            results = model(frame, conf=args.conf, imgsz=args.imgsz, half=False, device=device, verbose=False)
+            results = model(
+                frame,
+                conf=args.conf,
+                imgsz=args.imgsz,
+                half=False,        
+                device=device,
+                verbose=False,
+            )
 
             if results and results[0].keypoints is not None:
                 annotated_frame = results[0].plot(boxes=False)
 
-                kpts_xy = results[0].keypoints.xy
+                kpts_xy   = results[0].keypoints.xy
                 kpts_conf = results[0].keypoints.conf
 
                 if kpts_xy is not None and kpts_conf is not None and kpts_xy.shape[0] > 0:
-                    # Analizujemy tylko pierwszą wykrytą osobę
-                    xy = kpts_xy[0]
+                    #Analizujemy tylko pierwszą wykrytą osobę
+                    xy   = kpts_xy[0]
                     conf = kpts_conf[0]
 
-                    # Oblicz wszystkie kąty
+                    #Oblicz wszystkie kąty
                     angles: dict[str, float] = {}
                     for angle_name, (iA, iB, iC) in ANGLE_DEFS:
                         ptA, confA = get_point(xy, conf, iA)
@@ -256,11 +327,25 @@ def main():
 
                     plank = is_plank_position(angles)
                     errors = evaluate_plank(angles) if plank else []
+                    error_buffer.append(errors)
 
-                    fps = 1.0 / max(time.perf_counter() - start_time, 1e-6)
+                    #Wygładzanie błędów które wystąpiły w przynajmniej 50% klatek
+                    smoothed_errors = []
+                    if error_buffer:
+                        all_errors = set(e for frame_errs in error_buffer for e in frame_errs)
+                        threshold = len(error_buffer) * 0.5
+                        smoothed_errors = [
+                            e for e in all_errors
+                            if sum(1 for fe in error_buffer if e in fe) >= threshold
+                        ]
 
+                    # FPS
+                    fps_counter.append(time.perf_counter() - t0)
+                    fps = len(fps_counter) / sum(fps_counter) if fps_counter else 0
+
+                    # Rysuj kąty i HUD
                     draw_angles_on_skeleton(annotated_frame, xy, conf, angles, args.angle_conf)
-                    draw_hud(annotated_frame, angles, plank, errors, fps)
+                    draw_hud(annotated_frame, angles, plank, smoothed_errors, fps)
 
                 last_annotated = annotated_frame
             else:
@@ -272,15 +357,26 @@ def main():
         cv2.imshow("Deska", last_annotated)
         frame_count += 1
 
-        #Ograniczenie do 30 klatek na sekundę
-        elapsed = time.perf_counter() - start_time
-        delay = int((frame_time - elapsed) * 1000)
-        key = cv2.waitKey(max(delay, 1)) & 0xFF
+        #Synchronizacja czasu
+        #Dla pliku wideo: czekamy tyle ile powinna trwać jedna klatka,
+        #uwzględniając czas spędzony na inferecji. Dzięki temu film
+        #odtwarza się z oryginalną prędkością nawet gdy CPU jest wolny.
+        #Dla kamery: tylko 1ms żeby nie blokować odczytu.
+        elapsed = time.perf_counter() - t0
+        if is_camera:
+            wait_ms = 1
+        else:
+            wait_ms = max(1, int((frame_duration - elapsed) * 1000))
+
+        key = cv2.waitKey(wait_ms) & 0xFF
         if key == ord('q') or key == 27:
             break
 
+    if camera_reader is not None:
+        camera_reader.stop()
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
