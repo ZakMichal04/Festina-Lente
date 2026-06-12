@@ -6,16 +6,7 @@ import os
 import math
 import torch
 import time
-
-
-"""
-    Poprawne kąty ułożenia ciała do ćwiczenia gdy kamera jest pod kątem 45st:
-
-    Biodro: ok 180st.
-    kolana ok 130st.
-    łokcie ok 90st.
-
-"""
+import numpy as np
 
 #  definicje kątów dla deski
 ANGLE_DEFS = [
@@ -84,23 +75,40 @@ def get_source_from_menu():
             print("Nieprawidłowy wybór. Wpisz 1 lub 2.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Analiza deski")
-    parser.add_argument("--model", type=str, default="yolov8m-pose.pt") # Ścieżka do modelu YOLO Pose
-    parser.add_argument("--conf", type=float, default=0.4) #Próg pewności detekcji (0-1)
-    parser.add_argument("--angle-conf", type=float, default=0.4) #Minimalna pewność punktów do obliczenia kąta
-    parser.add_argument("--imgsz", type=int, default=384) #Zmniejszenie rozmaru obrazu
-    parser.add_argument("--half", action="store_true") #Dodatkowe usprawnienie do karty graficznej, precyzja fp16
-    parser.add_argument("--skip", type=int, default=3) # Analiza co N-tą klatke
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="analiza deski")
+    parser.add_argument("--model",type=str,default="yolov8s-pose.pt",
+                        help="Ścieżka do modelu YOLO Pose")
+    parser.add_argument("--conf",type=float,default=0.4,
+                        help="Próg pewności detekcji (0-1)")
+    parser.add_argument("--angle-conf",type=float,default=0.4,
+                        help="Minimalna pewność punktów do obliczenia kąta")
+    # Mniejszy obraz = szybsza inferecja na CPU
+    parser.add_argument("--imgsz",type=int,default=320,
+                        help="Rozmiar obrazu wejściowego dla YOLO")
+    #analiza co 2 klatki  
+    parser.add_argument("--skip",type=int,default=2,
+                        help="Analiza co N-tą klatkę")
+    args = parser.parse_args() #Przesłanie argumentów z góry do funkcji
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu' #automatyczne wykrycie czy działa na cuda czy ma działać na cpu
-    print(f'Program działa na: {device}')
+    #Wykrycie czy ma pracować na karcie czy na procesorze
+    device = 'cuda' if torch.cuda.is_available() else 'cpu' 
+    print(f"Program działa na: {device}")
+    if device == 'cpu':
+        # Ustawianie wątków dla aplikacji
+        num_cores = os.cpu_count() or 4
+        torch.set_num_threads(num_cores)
+        cv2.setNumThreads(max(1, num_cores // 2))
+        print(f"CPU: {num_cores} rdzeni wykryto, ustawiono wątki.")
 
     try:
+        #Sprawdzanie czy wszystko działa
         model = YOLO(args.model)
         model.to(device)
+        dummy = np.zeros((args.imgsz, args.imgsz, 3),dtype=np.uint8)
+        model(dummy, imgsz=args.imgsz, verbose=False)
+        print("Model działa poprawnie")
     except Exception as e:
-        print(f"Błąd wczytywania modelu: {e}")
+        print(f"Błąd w wczytywaniu modelu w funkcji main: {e}")
         sys.exit(1)
 
     source = get_source_from_menu()
@@ -125,7 +133,7 @@ def main():
             break
 
         if frame_count % args.skip == 0:
-            results = model(frame, conf=args.conf, imgsz=args.imgsz, half=args.half, device=device, verbose=False)
+            results = model(frame, conf=args.conf, imgsz=args.imgsz, half=False, device=device, verbose=False)
 
             if results and results[0].keypoints is not None:
                 annotated_frame = results[0].plot(boxes=False)
@@ -133,39 +141,38 @@ def main():
                 kpts_xy = results[0].keypoints.xy
                 kpts_conf = results[0].keypoints.conf
 
-                if kpts_xy is not None and kpts_conf is not None:
-                    num_persons = kpts_xy.shape[0]
-                    for person_idx in range(num_persons):
-                        xy = kpts_xy[person_idx]
-                        conf = kpts_conf[person_idx]
+                if kpts_xy is not None and kpts_conf is not None and kpts_xy.shape[0] > 0:
+                    # Analizujemy tylko pierwszą wykrytą osobę (optymalizacja)
+                    xy = kpts_xy[0]
+                    conf = kpts_conf[0]
 
-                        # oblicznie zwykłych kątów
-                        for angle_name, (iA, iB, iC) in ANGLE_DEFS:
-                            ptA, confA = get_point(xy, conf, iA)
-                            ptB, confB = get_point(xy, conf, iB)
-                            ptC, confC = get_point(xy, conf, iC)
+                    # oblicznie zwykłych kątów
+                    for angle_name, (iA, iB, iC) in ANGLE_DEFS:
+                        ptA, confA = get_point(xy, conf, iA)
+                        ptB, confB = get_point(xy, conf, iB)
+                        ptC, confC = get_point(xy, conf, iC)
 
-                            if confA >= args.angle_conf and confB >= args.angle_conf and confC >= args.angle_conf:
-                                angle = compute_angle(ptA, ptB, ptC)
-                                text_pos = (int(ptB[0]), int(ptB[1]) - 10)
-                                cv2.putText(annotated_frame, f"{angle_name}: {angle:.1f}",
-                                            text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        if confA >= args.angle_conf and confB >= args.angle_conf and confC >= args.angle_conf:
+                            angle = compute_angle(ptA, ptB, ptC)
+                            text_pos = (int(ptB[0]), int(ptB[1]) - 10)
+                            cv2.putText(annotated_frame, f"{angle_name}: {angle:.1f}",
+                                        text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-                        #nachylenie tułowia w lewym górnym
-                        # Kod może być przydatny ale przy rzucie kamery pod kątem 45st. nie jest potrzebny
-                        # Lepiej polegać na koncie bioder
-                       # shoulder_mid, c_shoulder = get_point(xy, conf, (5, 6))
-                       # hip_mid, c_hip = get_point(xy, conf, (11, 12))
-                       # if c_shoulder >= args.angle_conf and c_hip >= args.angle_conf:
-                       #     dx = shoulder_mid[0] - hip_mid[0]
-                       #     dy = shoulder_mid[1] - hip_mid[1]
-                       #     norm = math.hypot(dx, dy)
-                       #     if norm > 0:
-                       #         cos_torso = dx / norm
-                       #         cos_torso = max(-1.0, min(1.0, cos_torso))
-                       #         torso_angle = math.degrees(math.acos(cos_torso))
-                       #         cv2.putText(annotated_frame, f"Nachylenie tulowia: {torso_angle:.1f}",
-                       #                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                    #nachylenie tułowia w lewym górnym
+                    # Kod może być przydatny ale przy rzucie kamery pod kątem 45st. nie jest potrzebny
+                    # Lepiej polegać na koncie bioder
+                   # shoulder_mid, c_shoulder = get_point(xy, conf, (5, 6))
+                   # hip_mid, c_hip = get_point(xy, conf, (11, 12))
+                   # if c_shoulder >= args.angle_conf and c_hip >= args.angle_conf:
+                   #     dx = shoulder_mid[0] - hip_mid[0]
+                   #     dy = shoulder_mid[1] - hip_mid[1]
+                   #     norm = math.hypot(dx, dy)
+                   #     if norm > 0:
+                   #         cos_torso = dx / norm
+                   #         cos_torso = max(-1.0, min(1.0, cos_torso))
+                   #         torso_angle = math.degrees(math.acos(cos_torso))
+                   #         cv2.putText(annotated_frame, f"Nachylenie tulowia: {torso_angle:.1f}",
+                   #                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 last_annotated = annotated_frame
             else:
                 last_annotated = frame
