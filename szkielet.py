@@ -19,6 +19,23 @@ ANGLE_DEFS = [
     ("Lokiec P",   (6, 8, 10)),
 ]
 
+# Progi poprawności
+# Każdy wpis: (min, max, komunikat błędu gdy poza zakresem)
+PLANK_THRESHOLDS = {
+    "Biodro":   (165, 195, "Biodra za nisko lub za wysoko! Wyprostuj biodra."),
+    "Kolano L": (155, 185, "Lewe kolano zgięte! Wyprostuj lewą nogę."),
+    "Kolano P": (155, 185, "Prawe kolano zgięte! Wyprostuj prawą nogę."),
+    "Lokiec L": (75,  105, "Lewy łokieć: ustaw pod kątem ~90°."),
+    "Lokiec P": (75,  105, "Prawy łokieć: ustaw pod kątem ~90°."),
+}
+
+# Detekcja deski: uznajemy że użytkownik robi deskę gdy kąt bioder i kolan mieści się w zakresie
+PLANK_DETECTION_RANGES = {
+    "Biodro":   (140, 210),
+    "Kolano L": (130, 200),
+    "Kolano P": (130, 200),
+}
+
 
 def compute_angle(A, B, C):
     """
@@ -52,6 +69,66 @@ def get_point(xy, conf, idx):
     return (float(xy[idx][0]), float(xy[idx][1])), float(conf[idx])
 
 
+def is_plank_position(angles: dict) -> bool:
+    """
+    Sprawdza czy wykryte kąty wskazują na pozycję deski.
+    Wymaga że przynajmniej dwa z trzech kluczowych kątów są w zakresie.
+    Przynajmniej dwa z 3 kątów musi być 
+    """
+    hits = 0
+    for name, (lo, hi) in PLANK_DETECTION_RANGES.items():
+        angle = angles.get(name)
+        if angle is not None and lo <= angle <= hi:
+            hits += 1
+    return hits >= 2
+
+
+def evaluate_plank(angles: dict) -> list[str]:
+    """
+    Zwraca listę komunikatów o błędach w pozycji deski.
+    Pusta lista = poprawna deska.
+    """
+    errors = []
+    for name, (lo, hi, msg) in PLANK_THRESHOLDS.items():
+        angle = angles.get(name)
+        if angle is not None and not (lo <= angle <= hi):
+            errors.append(msg)
+    return errors
+
+
+def draw_hud(frame, angles: dict, is_plank: bool, errors: list[str], fps: float):
+    """Rysowanie huda z pistem testowym"""
+    h, w = frame.shape[:2]
+
+    # FPS w prawym górnym rogu
+    fps_text = f"FPS: {fps:.1f}"
+    (tw, th), _ = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+    cv2.putText(frame, fps_text, (w - tw - 8, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+
+    if not is_plank:
+        cv2.putText(frame, "Brak deski", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 100, 255), 2)
+        return
+
+    # Status główny
+    if errors:
+        status_text = "DESKA: Popraw pozycje!"
+        status_color = (0, 100, 255)
+    else:
+        status_text = "DESKA: Swietnie!"
+        status_color = (0, 220, 0)
+
+    cv2.putText(frame, status_text, (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, status_color, 2)
+
+    # Błędy pozycji
+    for i, err in enumerate(errors):
+        y = 60 + i * 26
+        cv2.putText(frame, f"  ! {err}", (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 80, 255), 2)
+
+
 def draw_angles_on_skeleton(frame, xy, conf, angles: dict, angle_conf: float):
     """Rysowanie kątów na szielecie"""
     for angle_name, (iA, iB, iC) in ANGLE_DEFS:
@@ -62,9 +139,17 @@ def draw_angles_on_skeleton(frame, xy, conf, angles: dict, angle_conf: float):
         )
         angle = angles.get(angle_name)
         if angle is not None and confB >= angle_conf:
-            text_pos = (int(ptB_raw[0]), int(ptB_raw[1]) - 10)
+            text_pos = (int(ptB_raw[0]) if not isinstance(iB, tuple) else int(ptB_raw[0]),
+                        int(ptB_raw[1]) if not isinstance(iB, tuple) else int(ptB_raw[1]))
+            text_pos = (text_pos[0], text_pos[1] - 10)
+            color = (0, 255, 0)
+            # Pokoloruj na czerwono jeśli kąt poza progiem deski
+            if angle_name in PLANK_THRESHOLDS:
+                lo, hi, _ = PLANK_THRESHOLDS[angle_name]
+                if not (lo <= angle <= hi):
+                    color = (0, 80, 255)
             cv2.putText(frame, f"{angle_name}: {angle:.1f}",
-                        text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
 
 
 def get_source_from_menu():
@@ -169,7 +254,14 @@ def main():
                         if confA >= args.angle_conf and confB >= args.angle_conf and confC >= args.angle_conf:
                             angles[angle_name] = compute_angle(ptA, ptB, ptC)
 
+                    plank = is_plank_position(angles)
+                    errors = evaluate_plank(angles) if plank else []
+
+                    fps = 1.0 / max(time.perf_counter() - start_time, 1e-6)
+
                     draw_angles_on_skeleton(annotated_frame, xy, conf, angles, args.angle_conf)
+                    draw_hud(annotated_frame, angles, plank, errors, fps)
+
                 last_annotated = annotated_frame
             else:
                 last_annotated = frame
