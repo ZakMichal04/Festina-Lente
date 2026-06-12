@@ -86,4 +86,3 @@ def tworzenie_widoku():
     
 if __name__ == '__main__':
     tworzenie_tabel()
-    tworzenie_widoku()
