@@ -44,14 +44,28 @@ def get_point(xy, conf, idx):
     Zwraca: ((x,y), min_conf)
     """
     if isinstance(idx, tuple):
-        p1 = xy[idx[0]]
-        p2 = xy[idx[1]]
-        x = (p1[0] + p2[0]) / 2.0
-        y = (p1[1] + p2[1]) / 2.0
-        min_c = min(conf[idx[0]], conf[idx[1]])
+        p1, p2 = xy[idx[0]], xy[idx[1]]
+        x = (float(p1[0]) + float(p2[0])) / 2.0
+        y = (float(p1[1]) + float(p2[1])) / 2.0
+        min_c = min(float(conf[idx[0]]), float(conf[idx[1]]))
         return (x, y), min_c
-    else:
-        return (xy[idx][0], xy[idx][1]), conf[idx]
+    return (float(xy[idx][0]), float(xy[idx][1])), float(conf[idx])
+
+
+def draw_angles_on_skeleton(frame, xy, conf, angles: dict, angle_conf: float):
+    """Rysowanie kątów na szielecie"""
+    for angle_name, (iA, iB, iC) in ANGLE_DEFS:
+        _, confB = get_point(xy, conf, iB)
+        ptB_raw = xy[iB] if not isinstance(iB, tuple) else (
+            ((xy[iB[0]][0] + xy[iB[1]][0]) / 2),
+            ((xy[iB[0]][1] + xy[iB[1]][1]) / 2),
+        )
+        angle = angles.get(angle_name)
+        if angle is not None and confB >= angle_conf:
+            text_pos = (int(ptB_raw[0]), int(ptB_raw[1]) - 10)
+            cv2.putText(frame, f"{angle_name}: {angle:.1f}",
+                        text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
 
 def get_source_from_menu():
     """
@@ -142,37 +156,20 @@ def main():
                 kpts_conf = results[0].keypoints.conf
 
                 if kpts_xy is not None and kpts_conf is not None and kpts_xy.shape[0] > 0:
-                    # Analizujemy tylko pierwszą wykrytą osobę (optymalizacja)
+                    # Analizujemy tylko pierwszą wykrytą osobę
                     xy = kpts_xy[0]
                     conf = kpts_conf[0]
 
-                    # oblicznie zwykłych kątów
+                    # Oblicz wszystkie kąty
+                    angles: dict[str, float] = {}
                     for angle_name, (iA, iB, iC) in ANGLE_DEFS:
                         ptA, confA = get_point(xy, conf, iA)
                         ptB, confB = get_point(xy, conf, iB)
                         ptC, confC = get_point(xy, conf, iC)
-
                         if confA >= args.angle_conf and confB >= args.angle_conf and confC >= args.angle_conf:
-                            angle = compute_angle(ptA, ptB, ptC)
-                            text_pos = (int(ptB[0]), int(ptB[1]) - 10)
-                            cv2.putText(annotated_frame, f"{angle_name}: {angle:.1f}",
-                                        text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                            angles[angle_name] = compute_angle(ptA, ptB, ptC)
 
-                    #nachylenie tułowia w lewym górnym
-                    # Kod może być przydatny ale przy rzucie kamery pod kątem 45st. nie jest potrzebny
-                    # Lepiej polegać na koncie bioder
-                   # shoulder_mid, c_shoulder = get_point(xy, conf, (5, 6))
-                   # hip_mid, c_hip = get_point(xy, conf, (11, 12))
-                   # if c_shoulder >= args.angle_conf and c_hip >= args.angle_conf:
-                   #     dx = shoulder_mid[0] - hip_mid[0]
-                   #     dy = shoulder_mid[1] - hip_mid[1]
-                   #     norm = math.hypot(dx, dy)
-                   #     if norm > 0:
-                   #         cos_torso = dx / norm
-                   #         cos_torso = max(-1.0, min(1.0, cos_torso))
-                   #         torso_angle = math.degrees(math.acos(cos_torso))
-                   #         cv2.putText(annotated_frame, f"Nachylenie tulowia: {torso_angle:.1f}",
-                   #                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                    draw_angles_on_skeleton(annotated_frame, xy, conf, angles, args.angle_conf)
                 last_annotated = annotated_frame
             else:
                 last_annotated = frame
@@ -183,7 +180,7 @@ def main():
         cv2.imshow("Deska", last_annotated)
         frame_count += 1
 
-        # Ograniczenie do 30 klatek na sekundę
+        #Ograniczenie do 30 klatek na sekundę
         elapsed = time.perf_counter() - start_time
         delay = int((frame_time - elapsed) * 1000)
         key = cv2.waitKey(max(delay, 1)) & 0xFF
