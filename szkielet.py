@@ -9,6 +9,8 @@ import time
 import threading
 from collections import deque
 import numpy as np
+#OpenVINO jest ładowany z biblioteki Ultralytics
+
 
 #Definicja kątów ciała
 ANGLE_DEFS = [
@@ -211,16 +213,37 @@ def get_source_from_menu():
             print("Nieprawidłowy wybór. Wpisz 1 lub 2.")
 
 
+def load_model(model_path, device, imgsz):
+    """
+    Wczytuje model YOLO na CPU eksportuje go jednorazowo do OpenVino
+    (szybsza inferecja na procesorach Intela co pozwoli mi na wrzucić bardziej wymagający model oraz lepszą rozdzielczość działa tylko na cpu bo na gpu to tu nie ma co działać) 
+    i ładuje wersję OpenVINO.
+    """
+    if os.path.isdir(model_path):
+        return YOLO(model_path, task="pose")
+
+    if device != 'cpu':
+        model = YOLO(model_path)
+        model.to(device)
+        return model
+
+    # Na CPU jeśli nie ma jeszcze wersji OpenVINO to zrobić jej export
+    ov_dir = model_path.replace(".pt", "_openvino_model")
+    if not os.path.isdir(ov_dir):
+        YOLO(model_path).export(format="openvino", imgsz=imgsz)
+    return YOLO(ov_dir, task="pose")
+
+
 def main():
     parser = argparse.ArgumentParser(description="analiza deski")
-    parser.add_argument("--model",type=str,default="yolov8s-pose.pt",
+    parser.add_argument("--model",type=str,default="yolo11s-pose.pt", #Zamienić na yolov8s lub yolo11n jeżeli są problemy z szkieletem
                         help="Ścieżka do modelu YOLO Pose")
     parser.add_argument("--conf",type=float,default=0.6,
                         help="Próg pewności detekcji (0-1)")
     parser.add_argument("--angle-conf",type=float,default=0.5,
                         help="Minimalna pewność punktów do obliczenia kąta")
     # Mniejszy obraz = szybsza inferecja na CPU
-    parser.add_argument("--imgsz",type=int,default=256,
+    parser.add_argument("--imgsz",type=int,default=640,
                         help="Rozmiar obrazu wejściowego dla YOLO")
     #analiza co 2 klatki  
     parser.add_argument("--skip",type=int,default=2,
@@ -239,8 +262,7 @@ def main():
 
     try:
         #Sprawdzanie czy wszystko działa
-        model = YOLO(args.model)
-        model.to(device)
+        model = load_model(args.model, device, args.imgsz)
         dummy = np.zeros((args.imgsz, args.imgsz, 3),dtype=np.uint8)
         model(dummy, imgsz=args.imgsz, verbose=False)
         print("Model działa poprawnie")
@@ -312,11 +334,11 @@ def main():
                 kpts_conf = results[0].keypoints.conf
 
                 if kpts_xy is not None and kpts_conf is not None and kpts_xy.shape[0] > 0:
-                    #Analizujemy tylko pierwszą wykrytą osobę
+                    # Analizujemy tylko pierwszą wykrytą osobę
                     xy   = kpts_xy[0]
                     conf = kpts_conf[0]
 
-                    #Oblicz wszystkie kąty
+                    # Oblicz wszystkie kąty
                     angles: dict[str, float] = {}
                     for angle_name, (iA, iB, iC) in ANGLE_DEFS:
                         ptA, confA = get_point(xy, conf, iA)
@@ -339,7 +361,7 @@ def main():
                             if sum(1 for fe in error_buffer if e in fe) >= threshold
                         ]
 
-                    # FPS
+                    # FPS na HUD
                     fps_counter.append(time.perf_counter() - t0)
                     fps = len(fps_counter) / sum(fps_counter) if fps_counter else 0
 
