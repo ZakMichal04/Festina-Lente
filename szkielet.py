@@ -11,7 +11,6 @@ from collections import deque
 import numpy as np
 #OpenVINO jest ładowany z biblioteki Ultralytics
 
-
 #Definicja kątów ciała
 ANGLE_DEFS = [
     ("Bark L",   (7,  5,  (11, 12))),
@@ -26,9 +25,9 @@ ANGLE_DEFS = [
 #Progi kątów dla deski (kamera z boku)
 #Każdy wpis: (min, max, komunikat błędu gdy poza zakresem)
 PLANK_THRESHOLDS = {
-    "Biodro":   (165, 195, "Biodra za nisko lub za wysoko! Wyprostuj biodra."),
-    "Kolano L": (155, 195, "Lewe kolano zgięte! Wyprostuj lewą nogę."),
-    "Kolano P": (155, 195, "Prawe kolano zgięte! Wyprostuj prawą nogę."),
+    "Biodro":   (145, 205, "Biodra za nisko lub za wysoko! Wyprostuj biodra."),
+    "Kolano L": (145, 185, "Lewe kolano zgięte! Wyprostuj lewą nogę."),
+    "Kolano P": (145, 185, "Prawe kolano zgięte! Wyprostuj prawą nogę."),
     "Lokiec L": (75,  105, "Lewy łokieć: ustaw pod kątem ~90°."),
     "Lokiec P": (75,  105, "Prawy łokieć: ustaw pod kątem ~90°."),
 }
@@ -55,7 +54,7 @@ SMOOTHING_FRAMES = 90
 
 #Funkcje do liczenia kątów i innych wartości
 def compute_angle(A, B, C):
-    """Oblicza kąt ABC (w stopniach) na podstawie trzech punktów (x,y)."""
+    """Oblicza kąt ABC (w stopniach) na podstawie trzech punktów (x,y)"""
     BA = (A[0] - B[0], A[1] - B[1])
     BC = (C[0] - B[0], C[1] - B[1])
     dot = BA[0] * BC[0] + BA[1] * BC[1]
@@ -70,7 +69,7 @@ def compute_angle(A, B, C):
 def get_point(xy, conf, idx):
     """
     Pobiera punkt (x,y) i pewność.
-    idx może być int lub tuple dwóch indeksów – wtedy uśrednia oba punkty.
+    idx może być int lub tuple dwóch indeksów – wtedy uśrednia oba punkty
     """
     if isinstance(idx, tuple):
         p1, p2 = xy[idx[0]], xy[idx[1]]
@@ -234,9 +233,28 @@ def load_model(model_path, device, imgsz):
     return YOLO(ov_dir, task="pose")
 
 
+def calculate_roi(box, frame_w, frame_h, margin):
+    """
+    Wyznacza prostokąt wokół osoby (z lekkim marginesem) we współrzędnych pełnej klatki
+    Zwraca (x1, y1, x2, y2) albo None gdy obszar jest zbyt mały
+    """
+    x1, y1, x2, y2 = box
+    bw = x2 - x1
+    bh = y2 - y1
+    mx = bw * margin
+    my = bh * margin
+    nx1 = max(0, int(x1 - mx))
+    ny1 = max(0, int(y1 - my))
+    nx2 = min(frame_w, int(x2 + mx))
+    ny2 = min(frame_h, int(y2 + my))
+    if nx2 - nx1 < 20 or ny2 - ny1 < 20:
+        return None
+    return (nx1, ny1, nx2, ny2)
+
+
 def main():
     parser = argparse.ArgumentParser(description="analiza deski")
-    parser.add_argument("--model",type=str,default="yolo11s-pose.pt", #Zamienić na yolov8s lub yolo11n jeżeli są problemy z szkieletem
+    parser.add_argument("--model",type=str,default="yolov8n-pose.pt",
                         help="Ścieżka do modelu YOLO Pose")
     parser.add_argument("--conf",type=float,default=0.6,
                         help="Próg pewności detekcji (0-1)")
@@ -248,6 +266,8 @@ def main():
     #analiza co 2 klatki  
     parser.add_argument("--skip",type=int,default=2,
                         help="Analiza co N-tą klatkę")
+    parser.add_argument("--roi-margin",type=float,default=0.25,
+                        help="Margines ROI wokół osoby (np. 0.25 to +25 procent)")
     args = parser.parse_args() #Przesłanie argumentów z góry do funkcji
 
     #Wykrycie czy ma pracować na karcie czy na procesorze
@@ -297,6 +317,7 @@ def main():
 
     frame_count = 0
     last_annotated = None
+    roi_box = None  # bieżący obszar ROI
     fps_counter = deque(maxlen=30)
     error_buffer: deque[list] = deque(maxlen=SMOOTHING_FRAMES)
 
@@ -318,8 +339,17 @@ def main():
                 break
 
         if frame_count % args.skip == 0:
+            #jeśli mamy obszar z poprzedniej klatki z roi to analizujemy tylko jego wycinek
+            if roi_box is not None:
+                rx1, ry1, rx2, ry2 = roi_box
+                infer_img = frame[ry1:ry2, rx1:rx2]
+                off_x, off_y = rx1, ry1
+            else:
+                infer_img = frame
+                off_x, off_y = 0, 0
+
             results = model(
-                frame,
+                infer_img,
                 conf=args.conf,
                 imgsz=args.imgsz,
                 half=False,        
@@ -328,15 +358,28 @@ def main():
             )
 
             if results and results[0].keypoints is not None:
-                annotated_frame = results[0].plot(boxes=False)
+                #Wklejanie szkieletu z wycinka ROI z powrotem w pełną klatkę
+                annotated_frame = frame.copy()
+                annotated_region = results[0].plot(boxes=False)
+                annotated_frame[off_y:off_y + annotated_region.shape[0],
+                                off_x:off_x + annotated_region.shape[1]] = annotated_region
+
+                #Aktualizacja ROI z nowego boxa
+                if results[0].boxes is not None and len(results[0].boxes) > 0:
+                    bx = results[0].boxes.xyxy[0].cpu().numpy()
+                    box_full = (bx[0] + off_x, bx[1] + off_y, bx[2] + off_x, bx[3] + off_y)
+                    roi_box = calculate_roi(box_full, frame.shape[1], frame.shape[0], args.roi_margin)
+                else:
+                    roi_box = None
 
                 kpts_xy   = results[0].keypoints.xy
                 kpts_conf = results[0].keypoints.conf
 
                 if kpts_xy is not None and kpts_conf is not None and kpts_xy.shape[0] > 0:
-                    # Analizujemy tylko pierwszą wykrytą osobę
-                    xy   = kpts_xy[0]
-                    conf = kpts_conf[0]
+                    xy   = kpts_xy[0].cpu().numpy().copy()
+                    xy[:, 0] += off_x
+                    xy[:, 1] += off_y
+                    conf = kpts_conf[0].cpu().numpy()
 
                     # Oblicz wszystkie kąty
                     angles: dict[str, float] = {}
@@ -371,6 +414,8 @@ def main():
 
                 last_annotated = annotated_frame
             else:
+                # Jak nic nie wykryło to resetuje ROI
+                roi_box = None
                 last_annotated = frame
         else:
             if last_annotated is None:
