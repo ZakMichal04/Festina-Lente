@@ -26,11 +26,11 @@ ANGLE_DEFS = [
 #Progi kątów dla deski (kamera z boku)
 #Każdy wpis: (min, max, komunikat błędu gdy poza zakresem)
 PLANK_THRESHOLDS = {
-    "Biodro":   (145, 205, "Biodra za nisko lub za wysoko! Wyprostuj biodra."),
-    "Kolano L": (145, 185, "Lewe kolano zgięte! Wyprostuj lewą nogę."),
-    "Kolano P": (145, 185, "Prawe kolano zgięte! Wyprostuj prawą nogę."),
-    "Lokiec L": (75,  105, "Lewy łokieć: ustaw pod kątem ~90°."),
-    "Lokiec P": (75,  105, "Prawy łokieć: ustaw pod kątem ~90°."),
+    "Biodro":   (160, 190, "Biodra za nisko lub za wysoko! Wyprostuj biodra."),
+    "Kolano L": (160, 190, "Lewe kolano zgięte! Wyprostuj lewą nogę."),
+    "Kolano P": (160, 190, "Prawe kolano zgięte! Wyprostuj prawą nogę."),
+    "Lokiec L": (75,  100, "Lewy łokieć: ustaw pod kątem ~90°."),
+    "Lokiec P": (75,  100, "Prawy łokieć: ustaw pod kątem ~90°."),
 }
 
 PLANK_THRESHOLDS_45_DEGREE = {
@@ -55,6 +55,13 @@ PLANK_PAIRS = {
     "kolana": ("Kolano L", "Kolano P"),
     "lokcie": ("Lokiec L", "Lokiec P"),
 }
+
+#Zmienna do sprawdzania czy się stoi czy się leży, 
+#więc teraz nie będzie pokazywało że robi się deskę gdy się stoi
+PLANK_MAX_TILT_DEG = 50.0
+
+#Priorytet błędów, najpierw błędy biodra potem kolan i łokci
+ERROR_PRIORITY = [msg for (_lo, _hi, msg) in PLANK_THRESHOLDS.values()]
 
 # Liczba ostatnich klatek do uśredniania błędów 
 SMOOTHING_FRAMES = 90
@@ -99,6 +106,33 @@ def is_plank_position(angles: dict) -> bool:
         if angle is not None and lo <= angle <= hi:
             hits += 1
     return hits >= 2
+
+
+def compute_body_tilt(xy, conf, angle_conf):
+    """
+    Oblicza nachylenie ciała względem poziomu
+    tak aby móc określicz czy się stoi pionowo czy się leży
+    jak nie jest pewne czy się stoi czy nie to zwraca none
+    """
+    (sx, sy), c_sh = get_point(xy, conf, (5, 6))
+    (hx, hy), c_hp = get_point(xy, conf, (11, 12))
+    if c_sh < angle_conf or c_hp < angle_conf:
+        return None
+    dx = hx - sx
+    dy = hy - sy
+    if dx == 0 and dy == 0:
+        return None
+    return abs(math.degrees(math.atan2(abs(dy), abs(dx))))
+
+
+def is_body_horizontal(tilt) -> bool:
+    """
+    Zwraca prawdę jak tilt jest mniejszy bądź równy
+    od PLANK_MAX_TILT, w przeciwnym razie zwraca fałsz
+    """
+    if tilt is None:
+        return True
+    return tilt <= PLANK_MAX_TILT_DEG
 
 def evaluate_plank(angles: dict) -> list[str]:
     """
@@ -562,18 +596,35 @@ def main():
                             angles[angle_name] = compute_angle(ptA, ptB, ptC)
 
                     plank = is_plank_position(angles)
+                    # ===== ZMIANA (AI): odrzucenie deski przy pozycji pionowej =====
+                    # Gdy ktos stoi na wprost, biodra i kolana tez sa wyprostowane,
+                    # wiec is_plank_position dawalo falszywa deske. Sprawdzamy wiec,
+                    # czy tulow jest poziomy. Jesli pewnie pionowy -> to nie deska.
+                    if plank:
+                        tilt = compute_body_tilt(xy, conf, args.angle_conf)
+                        if not is_body_horizontal(tilt):
+                            plank = False
+                    # ===== KONIEC ZMIANY (AI) =====
                     errors = evaluate_plank(angles) if plank else []
                     error_buffer.append(errors)
 
                     #Wygładzanie błędów które wystąpiły w przynajmniej 50% klatek
+                    # ===== ZMIANA (AI): deterministyczna, priorytetowa kolejnosc =====
+                    # Wczesniej smoothed_errors powstawalo ze zbioru set -> kolejnosc
+                    # byla losowa. Teraz idziemy wg ERROR_PRIORITY (biodra -> kolana
+                    # -> lokcie), wiec najwazniejsze bledy sa zglaszane pierwsze.
                     smoothed_errors = []
                     if error_buffer:
-                        all_errors = set(e for frame_errs in error_buffer for e in frame_errs)
                         threshold = len(error_buffer) * 0.5
+                        counts: dict[str, int] = {}
+                        for fe in error_buffer:
+                            for e in fe:
+                                counts[e] = counts.get(e, 0) + 1
                         smoothed_errors = [
-                            e for e in all_errors
-                            if sum(1 for fe in error_buffer if e in fe) >= threshold
+                            msg for msg in ERROR_PRIORITY
+                            if counts.get(msg, 0) >= threshold
                         ]
+                    # ===== KONIEC ZMIANY (AI) =====
 
                     # FPS na HUD
                     fps_counter.append(time.perf_counter() - t0)
