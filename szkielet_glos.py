@@ -49,9 +49,15 @@ PLANK_DETECTION_RANGES = {
     "Kolano P": (130, 200),
 }
 
+#Wystarczy że tylko jedna kończyna z pary jest poprawna
+#aby stwierdzić że deska jest wykonana poprawnie
+PLANK_PAIRS = {
+    "kolana": ("Kolano L", "Kolano P"),
+    "lokcie": ("Lokiec L", "Lokiec P"),
+}
+
 # Liczba ostatnich klatek do uśredniania błędów 
 SMOOTHING_FRAMES = 90
-
 
 #Funkcje do liczenia kątów i innych wartości
 def compute_angle(A, B, C):
@@ -94,19 +100,46 @@ def is_plank_position(angles: dict) -> bool:
             hits += 1
     return hits >= 2
 
-
 def evaluate_plank(angles: dict) -> list[str]:
     """
     Zwraca listę komunikatów o błędach w pozycji deski.
     Pusta lista = poprawna deska.
+    Dla kończyn parzystych czyli kolana i łokcie 
+    obowiązuje zasada wystarczy jedna poprawna strona
     """
-    errors = []
+    errors: list[str] = []
+
+    # Nazwy należące do par
+    paired_names = {name for sides in PLANK_PAIRS.values() for name in sides}
+
+    # Kończyny bez par: biodra itp.
     for name, (lo, hi, msg) in PLANK_THRESHOLDS.items():
+        if name in paired_names:
+            continue
         angle = angles.get(name)
         if angle is not None and not (lo <= angle <= hi):
             errors.append(msg)
-    return errors
 
+    # Kończyny z parami
+    for sides in PLANK_PAIRS.values():
+        visible = []  # Tablica na kończyny które program widzi
+        for name in sides:
+            if name not in PLANK_THRESHOLDS:
+                continue
+            angle = angles.get(name)
+            if angle is None:
+                continue
+            lo, hi, msg = PLANK_THRESHOLDS[name]
+            visible.append((lo <= angle <= hi, msg))
+
+        if not visible:
+            continue  # brak danych 
+        if any(in_range for in_range, _ in visible):
+            continue  # przynajmniej jedna strona poprawna 
+        for _, msg in visible: #Dodanie do komunikatu co jest błędne
+            errors.append(msg)
+
+    return errors
 
 def draw_hud(frame, angles: dict, is_plank: bool, errors: list[str], fps: float):
     """Rysowanie huda z pistem testowym"""
