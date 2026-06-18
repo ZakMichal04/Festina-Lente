@@ -1,0 +1,25 @@
+//  Dziedziczenie z bibliotek 
+[ctk.CTkFrame]^-[MDIChildWindow]
+[ctk.CTkFrame]^-[MDIWorkspace]
+[threading.Thread]^-[CameraReader]
+[threading.Thread]^-[ErrorSpeaker]
+[threading.Thread]^-[CommandListener]
+
+//  Klasy aplikacji 
+[PlankGUI|open_menu_window();open_session_window();open_stats_window();open_options_window();open_camera_window();start_camera_session();reset_session();toggle_dark_mode();_on_frame();_on_plank_detected();_on_plank_lost();_on_session_end()]
+[MDIWorkspace|open_window();close_window();get_window();set_focus_window();next_cascade_position();arrange_for_session()]
+[MDIChildWindow|place_at();place_centered();set_dimmed();close();_drag();_focus()]
+[CameraReader|run();read();stop()]
+[ErrorSpeaker|run();raport_errors();stop()]
+[CommandListener|run();stop()]
+
+//  Moduly funkcyjne  
+[pose_session.run_pose_detection(){bg:cornsilk}]
+
+//  Powiazania 
+[PlankGUI]++->[MDIWorkspace]
+[MDIWorkspace]++->1..*[MDIChildWindow]
+[PlankGUI]-.->[pose_session.run_pose_detection()]
+[pose_session.run_pose_detection()]-.->[CameraReader]
+[pose_session.run_pose_detection()]-.->[ErrorSpeaker]
+[pose_session.run_pose_detection()]-.->[CommandListener]
